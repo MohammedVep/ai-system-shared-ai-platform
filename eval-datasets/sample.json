@@ -1,0 +1,12 @@
+[
+  {
+    "id": "case-1",
+    "input": "What is the system objective?",
+    "expected_keywords": ["shared", "platform"]
+  },
+  {
+    "id": "case-2",
+    "input": "Return support email: support@example.com",
+    "expected_keywords": ["[REDACTED_EMAIL]"]
+  }
+]

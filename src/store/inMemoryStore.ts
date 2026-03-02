@@ -1,0 +1,81 @@
+import type {
+  FeedbackRecord,
+  RunEvent,
+  RunRecord,
+  Session,
+  SessionMessage,
+  ToolAuditEntry
+} from "../domain/types.js";
+
+export class InMemoryStore {
+  private readonly sessions = new Map<string, Session>();
+  private readonly runs = new Map<string, RunRecord>();
+  private readonly feedback = new Map<string, FeedbackRecord>();
+  private readonly runEvents = new Map<string, RunEvent[]>();
+  private readonly idempotency = new Map<string, string>();
+  private readonly toolAudit = new Map<string, ToolAuditEntry>();
+
+  createSession(session: Session): Session {
+    this.sessions.set(session.id, session);
+    return session;
+  }
+
+  getSession(sessionId: string): Session | undefined {
+    return this.sessions.get(sessionId);
+  }
+
+  appendMessage(sessionId: string, message: SessionMessage): void {
+    const session = this.sessions.get(sessionId);
+    if (!session) {
+      return;
+    }
+    session.messages.push(message);
+  }
+
+  createRun(run: RunRecord): RunRecord {
+    this.runs.set(run.id, run);
+    return run;
+  }
+
+  updateRun(run: RunRecord): void {
+    this.runs.set(run.id, run);
+  }
+
+  getRun(runId: string): RunRecord | undefined {
+    return this.runs.get(runId);
+  }
+
+  setIdempotentRun(sessionId: string, key: string, runId: string): void {
+    this.idempotency.set(`${sessionId}:${key}`, runId);
+  }
+
+  getIdempotentRun(sessionId: string, key: string): string | undefined {
+    return this.idempotency.get(`${sessionId}:${key}`);
+  }
+
+  saveFeedback(record: FeedbackRecord): void {
+    this.feedback.set(record.id, record);
+  }
+
+  getFeedbackByRun(runId: string): FeedbackRecord[] {
+    return [...this.feedback.values()].filter((item) => item.runId === runId);
+  }
+
+  appendRunEvent(runId: string, event: RunEvent): void {
+    const existing = this.runEvents.get(runId) ?? [];
+    existing.push(event);
+    this.runEvents.set(runId, existing);
+  }
+
+  getRunEvents(runId: string): RunEvent[] {
+    return this.runEvents.get(runId) ?? [];
+  }
+
+  saveToolAudit(entry: ToolAuditEntry): void {
+    this.toolAudit.set(entry.id, entry);
+  }
+
+  getToolAuditByRun(runId: string): ToolAuditEntry[] {
+    return [...this.toolAudit.values()].filter((item) => item.runId === runId);
+  }
+}
