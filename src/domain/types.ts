@@ -49,6 +49,8 @@ export type RunRecord = {
   sessionId: string;
   projectId: string;
   userId: string;
+  releaseChannel: "baseline" | "canary";
+  modelHint?: string;
   status: RunStatus;
   toolMode: "auto" | "required" | "none";
   responseMode: "stream" | "sync";

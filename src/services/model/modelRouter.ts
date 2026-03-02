@@ -5,8 +5,10 @@ import { OpenAiModelProvider } from "./openAiProvider.js";
 
 export class ModelRouter {
   private readonly provider: ModelProvider;
+  private readonly defaultModelName: string;
 
   constructor(env: Env) {
+    this.defaultModelName = env.openAiModel;
     this.provider = env.openAiApiKey
       ? new OpenAiModelProvider(env.openAiApiKey, env.openAiModel)
       : new MockModelProvider();
@@ -18,5 +20,9 @@ export class ModelRouter {
 
   currentProviderName(): string {
     return this.provider.providerName;
+  }
+
+  defaultModel(): string {
+    return this.defaultModelName;
   }
 }

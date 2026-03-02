@@ -10,6 +10,7 @@ import type { PolicyEngine } from "../policy/policyEngine.js";
 import type { ToolBroker } from "../tool/toolBroker.js";
 import type { ModelRouter } from "../model/modelRouter.js";
 import type { TelemetryService } from "../telemetry/telemetryService.js";
+import type { CanaryService } from "../ops/canaryService.js";
 
 export class Orchestrator {
   private readonly planner: Planner;
@@ -25,6 +26,7 @@ export class Orchestrator {
     policyEngine: PolicyEngine,
     toolBroker: ToolBroker,
     modelRouter: ModelRouter,
+    private readonly canaryService: CanaryService,
     private readonly telemetry: TelemetryService,
   ) {
     this.planner = new Planner(env.maxPlanSteps);
@@ -56,7 +58,9 @@ export class Orchestrator {
       timestamp: new Date().toISOString(),
       payload: {
         query: run.query,
-        toolMode: run.toolMode
+        toolMode: run.toolMode,
+        releaseChannel: run.releaseChannel,
+        modelHint: run.modelHint
       }
     });
 
@@ -227,6 +231,7 @@ export class Orchestrator {
     run.error = payload.error;
     run.completedAt = new Date().toISOString();
     this.store.updateRun(run);
+    this.canaryService.recordRun(run);
 
     const eventType = payload.status === "completed" ? "RunCompleted" : "RunFailed";
     this.telemetry.publish({
@@ -244,7 +249,9 @@ export class Orchestrator {
         status: payload.status,
         terminationReason: payload.terminationReason,
         error: payload.error,
-        answer: run.finalAnswer
+        answer: run.finalAnswer,
+        releaseChannel: run.releaseChannel,
+        modelHint: run.modelHint
       }
     });
   }

@@ -7,6 +7,10 @@ Centralized AI Gateway for all internal projects with:
 - Tool broker + SDK contracts
 - Streaming run events over SSE
 - Audit + telemetry event trail
+- Canary controls + automatic rollback thresholds
+- SLO and operations dashboard endpoints
+- Telecom connector + cloud code execution tool
+- Legacy bot endpoint migration for multi-project onboarding
 
 ## Stack
 - Node.js 22, TypeScript, Fastify
@@ -18,6 +22,14 @@ Centralized AI Gateway for all internal projects with:
 2. `npm install`
 3. `npm run dev`
 4. Server: `http://localhost:3000`
+
+## Recruiter Frontend
+- Landing page: `GET /`
+- Live platform status API: `GET /v1/platform/status`
+- Static frontend assets are served from `public/` and present:
+- architecture highlights
+- capability readiness badges
+- live runtime metrics from the gateway
 
 ## API
 ### Create session
@@ -53,6 +65,9 @@ Tool invocation directive example:
 ### Stream run events
 `GET /v1/runs/{run_id}/stream`
 
+### Real-time transit telemetry stream
+`GET /v1/transit/telemetry/stream`
+
 ### Submit feedback
 `POST /v1/feedback`
 ```json
@@ -66,6 +81,20 @@ Tool invocation directive example:
 
 ## Contracts
 SDK interfaces are in [`src/contracts/sdk.ts`](src/contracts/sdk.ts).
+
+## Ops Endpoints
+- `GET /v1/platform/status`
+- `GET /v1/ops/slo-dashboard`
+- `GET /v1/ops/canary`
+- `POST /v1/ops/canary`
+- `GET /v1/ops/evals/latest`
+- `GET /v1/ops/netpulse`
+
+## Multi-Project Onboarding
+- Register project migration: `POST /v1/onboarding/projects`
+- List onboarded projects: `GET /v1/onboarding/projects`
+- Mark pilot live: `POST /v1/onboarding/projects/{projectId}/pilot-live`
+- Legacy endpoint bridge: `POST /legacy/{projectId}/chat`
 
 ## Offline Eval Runner
 Run:
@@ -84,3 +113,13 @@ Dataset path:
 ## Deployment Assets
 - Docker compose: `infra/docker-compose.yml`
 - Kubernetes baseline: `infra/k8s/deployment.yaml`
+- App Runner container config: `Dockerfile`
+
+## AWS App Runner Deployment
+1. Build and push image to ECR:
+- `aws ecr create-repository --repository-name ai-system-shared-ai-platform`
+- `aws ecr get-login-password --region us-east-1 | docker login --username AWS --password-stdin <account-id>.dkr.ecr.us-east-1.amazonaws.com`
+- `docker build -t ai-system-shared-ai-platform:latest .`
+- `docker tag ai-system-shared-ai-platform:latest <account-id>.dkr.ecr.us-east-1.amazonaws.com/ai-system-shared-ai-platform:latest`
+- `docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/ai-system-shared-ai-platform:latest`
+2. Create or update AWS App Runner service using that image with port `3000`.

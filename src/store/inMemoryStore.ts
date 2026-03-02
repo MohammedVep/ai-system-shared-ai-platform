@@ -24,6 +24,12 @@ export class InMemoryStore {
     return this.sessions.get(sessionId);
   }
 
+  findSessionByProjectUser(projectId: string, userId: string): Session | undefined {
+    return [...this.sessions.values()].find(
+      (session) => session.projectId === projectId && session.userId === userId,
+    );
+  }
+
   appendMessage(sessionId: string, message: SessionMessage): void {
     const session = this.sessions.get(sessionId);
     if (!session) {
@@ -43,6 +49,10 @@ export class InMemoryStore {
 
   getRun(runId: string): RunRecord | undefined {
     return this.runs.get(runId);
+  }
+
+  getAllRuns(): RunRecord[] {
+    return [...this.runs.values()];
   }
 
   setIdempotentRun(sessionId: string, key: string, runId: string): void {
@@ -71,11 +81,40 @@ export class InMemoryStore {
     return this.runEvents.get(runId) ?? [];
   }
 
+  getAllRunEvents(): RunEvent[] {
+    return [...this.runEvents.values()].flat();
+  }
+
   saveToolAudit(entry: ToolAuditEntry): void {
     this.toolAudit.set(entry.id, entry);
   }
 
   getToolAuditByRun(runId: string): ToolAuditEntry[] {
     return [...this.toolAudit.values()].filter((item) => item.runId === runId);
+  }
+
+  getPlatformSummary(): {
+    sessionCount: number;
+    runCount: number;
+    runStatusCounts: Record<string, number>;
+    feedbackCount: number;
+    auditEntryCount: number;
+    totalEventCount: number;
+  } {
+    const runStatusCounts = [...this.runs.values()].reduce<Record<string, number>>((acc, run) => {
+      acc[run.status] = (acc[run.status] ?? 0) + 1;
+      return acc;
+    }, {});
+
+    const totalEventCount = [...this.runEvents.values()].reduce((acc, events) => acc + events.length, 0);
+
+    return {
+      sessionCount: this.sessions.size,
+      runCount: this.runs.size,
+      runStatusCounts,
+      feedbackCount: this.feedback.size,
+      auditEntryCount: this.toolAudit.size,
+      totalEventCount
+    };
   }
 }

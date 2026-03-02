@@ -14,6 +14,8 @@ const schema = z.object({
   RETENTION_DAYS: z.coerce.number().int().positive().default(30),
   POLICY_FAIL_CLOSED_SCOPES: z.string().default("write,admin,payment"),
   PROJECT_TOOL_ALLOWLIST_JSON: z.string().default("{}")
+  ,
+  NETPULSE_ENDPOINT: z.string().url().optional()
 });
 
 export type Env = {
@@ -30,6 +32,7 @@ export type Env = {
   retentionDays: number;
   failClosedScopes: Set<string>;
   projectToolAllowlist: Record<string, string[]>;
+  netPulseEndpoint?: string;
 };
 
 const parseJson = <T>(raw: string, fallback: T): T => {
@@ -59,6 +62,7 @@ export const loadEnv = (source: NodeJS.ProcessEnv = process.env): Env => {
         .map((scope) => scope.trim())
         .filter(Boolean),
     ),
-    projectToolAllowlist: parseJson<Record<string, string[]>>(parsed.PROJECT_TOOL_ALLOWLIST_JSON, {})
+    projectToolAllowlist: parseJson<Record<string, string[]>>(parsed.PROJECT_TOOL_ALLOWLIST_JSON, {}),
+    netPulseEndpoint: parsed.NETPULSE_ENDPOINT
   };
 };

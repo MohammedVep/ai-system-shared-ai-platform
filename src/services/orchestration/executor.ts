@@ -177,22 +177,28 @@ export class Executor {
       }
 
       if (step.type === "model_response") {
-        const response = await this.modelRouter.generate({
-          projectId: run.projectId,
-          traceId: run.traceId,
-          runId: run.id,
-          messages: [
-            {
-              role: "system",
-              content:
-                "You are a project AI gateway assistant. Answer clearly, follow policy, and only use provided facts."
-            },
-            {
-              role: "user",
-              content: this.buildModelPrompt(run.query, run.context, toolOutputs)
-            }
-          ]
-        });
+        const response = await retryTransient(
+          () =>
+            this.modelRouter.generate({
+              projectId: run.projectId,
+              traceId: run.traceId,
+              runId: run.id,
+              modelHint: run.modelHint,
+              messages: [
+                {
+                  role: "system",
+                  content:
+                    "You are a project AI gateway assistant. Answer clearly, follow policy, and only use provided facts."
+                },
+                {
+                  role: "user",
+                  content: this.buildModelPrompt(run.query, run.context, toolOutputs)
+                }
+              ]
+            }),
+          this.env.retryTransient,
+          isTransientModelError,
+        );
 
         const redacted = this.policyEngine.sanitizeOutput(response.text);
         const outputDecision = await this.policyEngine.evaluate({
@@ -261,3 +267,17 @@ export class Executor {
     ].join("\n");
   }
 }
+
+const isTransientModelError = (error: unknown): boolean => {
+  if (!(error instanceof Error)) {
+    return false;
+  }
+  const message = error.message.toLowerCase();
+  return (
+    message.includes("timeout") ||
+    message.includes("timed out") ||
+    message.includes("rate limit") ||
+    message.includes("temporarily unavailable") ||
+    message.includes("overloaded")
+  );
+};

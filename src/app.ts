@@ -1,6 +1,18 @@
 import Fastify from "fastify";
+import fastifyStatic from "@fastify/static";
+import { existsSync } from "node:fs";
+import { readFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { loadEnv, type Env } from "./config/env.js";
-import { createSessionSchema, feedbackSchema, postMessageSchema } from "./api/schemas.js";
+import {
+  canaryConfigSchema,
+  createSessionSchema,
+  feedbackSchema,
+  legacyMessageSchema,
+  onboardingProjectSchema,
+  postMessageSchema
+} from "./api/schemas.js";
 import { InMemoryStore } from "./store/inMemoryStore.js";
 import { newId } from "./utils/id.js";
 import { AuthError, AuthService } from "./api/auth.js";
@@ -15,6 +27,17 @@ import type { RunRecord, Session } from "./domain/types.js";
 import { toSseEvent } from "./utils/sse.js";
 import type { ToolAdapter } from "./contracts/sdk.js";
 import { logger } from "./services/telemetry/logger.js";
+import { CanaryService } from "./services/ops/canaryService.js";
+import { SloService } from "./services/ops/sloService.js";
+import { CloudCodeExecutionService } from "./services/integrations/cloudCodeExecutionService.js";
+import { NetPulseService } from "./services/integrations/netPulseService.js";
+import { TelecomService } from "./services/integrations/telecomService.js";
+import { ProjectOnboardingService } from "./services/onboarding/projectOnboardingService.js";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const staticCandidates = [join(__dirname, "..", "public"), join(__dirname, "..", "..", "public")];
+const staticRoot = staticCandidates.find((path) => existsSync(path)) ?? staticCandidates[0];
 
 export type AppDeps = {
   env?: Env;
@@ -81,6 +104,68 @@ const defaultWriteTool: ToolAdapter = {
   })
 };
 
+const defaultTelecomTool = (telecomService: TelecomService): ToolAdapter => ({
+  toolId: "telecom_dispatch",
+  description: "Dispatches a telecom network message through configured provider",
+  inputSchema: {
+    type: "object",
+    properties: {
+      channel: { type: "string" },
+      to: { type: "string" },
+      message: { type: "string" }
+    },
+    required: ["channel", "to", "message"],
+    additionalProperties: false
+  },
+  outputSchema: {
+    type: "object",
+    properties: {
+      provider: { type: "string" },
+      messageId: { type: "string" },
+      accepted: { type: "boolean" }
+    },
+    required: ["provider", "messageId", "accepted"],
+    additionalProperties: false
+  },
+  timeoutMs: 2_000,
+  scopes: ["write"],
+  execute: async (input) => {
+    const payload = input as { channel: "sms" | "voice" | "whatsapp"; to: string; message: string };
+    const result = await telecomService.dispatch(payload);
+    return { output: result };
+  }
+});
+
+const defaultCloudExecTool = (executor: CloudCodeExecutionService): ToolAdapter => ({
+  toolId: "cloud_code_exec",
+  description: "Runs JavaScript code via cloud execution workers",
+  inputSchema: {
+    type: "object",
+    properties: {
+      code: { type: "string" },
+      timeout_ms: { type: "number" }
+    },
+    required: ["code"],
+    additionalProperties: false
+  },
+  outputSchema: {
+    type: "object",
+    properties: {
+      output: { type: "string" },
+      worker: { type: "string" }
+    },
+    required: ["output", "worker"],
+    additionalProperties: false
+  },
+  timeoutMs: 4_000,
+  scopes: ["read"],
+  execute: async (input) => {
+    const payload = input as { code: string; timeout_ms?: number };
+    const result = await executor.execute(payload.code, payload.timeout_ms ?? 1500);
+    return { output: result };
+  }
+});
+
 export const buildApp = (deps: AppDeps = {}) => {
   const env = deps.env ?? loadEnv();
   const store = deps.store ?? new InMemoryStore();
@@ -92,7 +177,14 @@ export const buildApp = (deps: AppDeps = {}) => {
   const policyEngine = new PolicyEngine(env);
   const toolBroker = new ToolBroker();
   const modelRouter = new ModelRouter(env);
+  const telecomService = new TelecomService();
+  const cloudCodeExecutionService = new CloudCodeExecutionService();
+  const onboardingService = new ProjectOnboardingService();
+  const canaryService = new CanaryService(modelRouter.defaultModel());
+  const sloService = new SloService(store);
   const telemetry = new TelemetryService(store);
+  const netPulseService = new NetPulseService(env.netPulseEndpoint);
+  telemetry.registerSink((event) => netPulseService.publish(event));
   const orchestrator = new Orchestrator(
     env,
     store,
@@ -100,11 +192,14 @@ export const buildApp = (deps: AppDeps = {}) => {
     policyEngine,
     toolBroker,
     modelRouter,
+    canaryService,
     telemetry,
   );
 
   toolBroker.registerTool("default", defaultEchoTool);
   toolBroker.registerTool("default", defaultWriteTool);
+  toolBroker.registerTool("default", defaultTelecomTool(telecomService));
+  toolBroker.registerTool("default", defaultCloudExecTool(cloudCodeExecutionService));
   for (const item of deps.toolAdapters ?? []) {
     toolBroker.registerTool(item.projectId, item.adapter);
   }
@@ -113,10 +208,247 @@ export const buildApp = (deps: AppDeps = {}) => {
     loggerInstance: logger
   });
 
+  app.register(fastifyStatic, {
+    root: staticRoot,
+    prefix: "/assets/",
+    index: false
+  });
+
+  app.get("/", async (_, reply) => {
+    return reply.type("text/html").sendFile("index.html");
+  });
+
+  app.get("/dashboard", async (_, reply) => {
+    return reply.type("text/html").sendFile("ops.html");
+  });
+
+  const enqueueRun = (params: {
+    session: Session;
+    message: string;
+    contextRefs?: string[];
+    toolMode: "auto" | "required" | "none";
+    responseMode: "stream" | "sync";
+    idempotencyKey?: string;
+  }): { run: RunRecord; reused: boolean } => {
+    if (params.idempotencyKey) {
+      const existingRunId = store.getIdempotentRun(params.session.id, params.idempotencyKey);
+      if (existingRunId) {
+        const existingRun = store.getRun(existingRunId);
+        if (existingRun) {
+          return { run: existingRun, reused: true };
+        }
+      }
+    }
+
+    const userMessage = {
+      id: newId(),
+      role: "user" as const,
+      content: params.message,
+      createdAt: new Date().toISOString()
+    };
+    store.appendMessage(params.session.id, userMessage);
+
+    const runId = newId();
+    const assignment = canaryService.assignRun(runId, modelRouter.defaultModel());
+
+    const run: RunRecord = {
+      id: runId,
+      traceId: newId(),
+      sessionId: params.session.id,
+      projectId: params.session.projectId,
+      userId: params.session.userId,
+      releaseChannel: assignment.channel,
+      modelHint: assignment.modelHint,
+      status: "queued",
+      toolMode: params.toolMode,
+      responseMode: params.responseMode,
+      query: params.message,
+      contextRefs: params.contextRefs,
+      context: [],
+      plan: [],
+      steps: [],
+      attempts: 0,
+      createdAt: new Date().toISOString(),
+      idempotencyKey: params.idempotencyKey
+    };
+
+    store.createRun(run);
+    if (params.idempotencyKey) {
+      store.setIdempotentRun(params.session.id, params.idempotencyKey, run.id);
+    }
+
+    setImmediate(() => {
+      orchestrator
+        .run(run.id)
+        .catch((error) => app.log.error({ error, runId: run.id }, "orchestrator run failed"));
+    });
+
+    return { run, reused: false };
+  };
+
   app.get("/health", async () => ({
     status: "ok",
-    provider: modelRouter.currentProviderName()
+    provider: modelRouter.currentProviderName(),
+    uptime_ms: Math.floor(process.uptime() * 1000)
   }));
+
+  app.get("/v1/platform/status", async () => {
+    const summary = store.getPlatformSummary();
+    return {
+      service: "shared-ai-platform-v1",
+      environment: env.nodeEnv,
+      provider: modelRouter.currentProviderName(),
+      generated_at: new Date().toISOString(),
+      capabilities: {
+        chat_interface: true,
+        context_assembly: true,
+        tool_calling: true,
+        planner_executor_verifier: true,
+        guardrails: true,
+        telemetry_and_eval: true,
+        telecom_network_connector: true,
+        cloud_code_execution: true,
+        mini_load_balancer: true,
+        realtime_transit_telemetry: true
+      },
+      runtime: {
+        timeout_ms: env.runTimeoutMs,
+        max_plan_steps: env.maxPlanSteps,
+        retry_transient: env.retryTransient,
+        retention_days: env.retentionDays,
+        cloud_exec_workers: cloudCodeExecutionService.workerCount()
+      },
+      summary,
+      slo: sloService.buildDashboard(),
+      canary: canaryService.getState(),
+      netpulse: netPulseService.status()
+    };
+  });
+
+  app.get("/v1/ops/slo-dashboard", async () => sloService.buildDashboard());
+
+  app.get("/v1/ops/canary", async () => canaryService.getState());
+
+  app.post("/v1/ops/canary", async (request, reply) => {
+    try {
+      const body = canaryConfigSchema.parse(request.body);
+      const updated = canaryService.updateConfig({
+        enabled: body.enabled,
+        trafficPercent: body.traffic_percent,
+        candidateModel: body.candidate_model,
+        rollbackThresholds: body.rollback_thresholds
+          ? {
+              maxErrorRateDelta: body.rollback_thresholds.max_error_rate_delta ?? 0.05,
+              maxLatencyMultiplier: body.rollback_thresholds.max_latency_multiplier ?? 1.25,
+              minSamples: body.rollback_thresholds.min_samples ?? 20
+            }
+          : undefined
+      });
+      return reply.send(updated);
+    } catch (error) {
+      return handleError(reply, error);
+    }
+  });
+
+  app.get("/v1/ops/evals/latest", async (request, reply) => {
+    try {
+      const evalPath = join(process.cwd(), "eval-results", "latest.json");
+      const raw = await readFile(evalPath, "utf8");
+      return reply.send(JSON.parse(raw));
+    } catch {
+      return reply.code(404).send({ error: "eval_not_found" });
+    }
+  });
+
+  app.get("/v1/ops/netpulse", async () => netPulseService.status());
+
+  app.get("/v1/transit/telemetry/stream", async (request, reply) => {
+    reply.raw.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      Connection: "keep-alive"
+    });
+
+    const unsubscribe = telemetry.subscribeAll((event) => {
+      reply.raw.write(toSseEvent(event.type, event));
+    });
+
+    const keepAlive = setInterval(() => {
+      reply.raw.write(": ping\n\n");
+    }, 15_000);
+
+    request.raw.on("close", () => {
+      clearInterval(keepAlive);
+      unsubscribe();
+    });
+  });
+
+  app.post("/v1/onboarding/projects", async (request, reply) => {
+    try {
+      const body = onboardingProjectSchema.parse(request.body);
+      const project = onboardingService.register({
+        projectId: body.project_id,
+        legacyEndpoint: body.legacy_endpoint,
+        adapterTools: body.adapter_tools,
+        status: body.status
+      });
+      return reply.code(201).send(project);
+    } catch (error) {
+      return handleError(reply, error);
+    }
+  });
+
+  app.get("/v1/onboarding/projects", async () => onboardingService.list());
+
+  app.post("/v1/onboarding/projects/:projectId/pilot-live", async (request, reply) => {
+    const projectId = (request.params as { projectId: string }).projectId;
+    const updated = onboardingService.markStatus(projectId, "pilot_live");
+    if (!updated) {
+      return reply.code(404).send({ error: "project_not_found" });
+    }
+    return reply.send(updated);
+  });
+
+  app.post("/legacy/:projectId/chat", async (request, reply) => {
+    try {
+      const projectId = (request.params as { projectId: string }).projectId;
+      const onboardingProject = onboardingService.get(projectId);
+      if (!onboardingProject) {
+        return reply.code(404).send({ error: "project_not_onboarded" });
+      }
+
+      const body = legacyMessageSchema.parse(request.body);
+      let session = store.findSessionByProjectUser(projectId, body.user_id);
+      if (!session) {
+        session = store.createSession({
+          id: newId(),
+          projectId,
+          userId: body.user_id,
+          channel: "legacy_migrated",
+          createdAt: new Date().toISOString(),
+          messages: []
+        });
+      }
+
+      const { run } = enqueueRun({
+        session,
+        message: body.message,
+        contextRefs: body.context_refs,
+        toolMode: body.tool_mode,
+        responseMode: body.response_mode
+      });
+      onboardingService.markStatus(projectId, "migrating");
+
+      return reply.send({
+        project_id: projectId,
+        run_id: run.id,
+        status: run.status,
+        migrated_from: onboardingProject.legacyEndpoint
+      });
+    } catch (error) {
+      return handleError(reply, error);
+    }
+  });
 
   app.post("/v1/sessions", async (request, reply) => {
     try {
@@ -159,58 +491,18 @@ export const buildApp = (deps: AppDeps = {}) => {
       rateLimiter.check(`${session.projectId}:${session.userId}`);
 
       const idempotencyKey = request.headers["idempotency-key"] as string | undefined;
-      if (idempotencyKey) {
-        const existingRunId = store.getIdempotentRun(sessionId, idempotencyKey);
-        if (existingRunId) {
-          const existing = store.getRun(existingRunId);
-          return reply.send({
-            run_id: existingRunId,
-            status: existing?.status ?? "running"
-          });
-        }
-      }
-
-      const userMessage = {
-        id: newId(),
-        role: "user" as const,
-        content: body.message,
-        createdAt: new Date().toISOString()
-      };
-      store.appendMessage(sessionId, userMessage);
-
-      const run: RunRecord = {
-        id: newId(),
-        traceId: newId(),
-        sessionId: session.id,
-        projectId: session.projectId,
-        userId: session.userId,
-        status: "queued",
+      const { run } = enqueueRun({
+        session,
+        message: body.message,
+        contextRefs: body.context_refs,
         toolMode: body.tool_mode,
         responseMode: body.response_mode,
-        query: body.message,
-        contextRefs: body.context_refs,
-        context: [],
-        plan: [],
-        steps: [],
-        attempts: 0,
-        createdAt: new Date().toISOString(),
         idempotencyKey
-      };
-
-      store.createRun(run);
-      if (idempotencyKey) {
-        store.setIdempotentRun(sessionId, idempotencyKey, run.id);
-      }
-
-      setImmediate(() => {
-        orchestrator
-          .run(run.id)
-          .catch((error) => app.log.error({ error, runId: run.id }, "orchestrator run failed"));
       });
 
       return reply.send({
         run_id: run.id,
-        status: "queued"
+        status: run.status
       });
     } catch (error) {
       return handleError(reply, error);
@@ -228,6 +520,8 @@ export const buildApp = (deps: AppDeps = {}) => {
       run_id: run.id,
       session_id: run.sessionId,
       project_id: run.projectId,
+      release_channel: run.releaseChannel,
+      model_hint: run.modelHint,
       status: run.status,
       attempts: run.attempts,
       steps: run.steps,

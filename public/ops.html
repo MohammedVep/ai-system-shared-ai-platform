@@ -1,0 +1,99 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Shared AI Platform | Ops Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="bg-noise" aria-hidden="true"></div>
+    <div class="orb orb-a" aria-hidden="true"></div>
+    <div class="orb orb-b" aria-hidden="true"></div>
+
+    <header class="shell topbar reveal">
+      <p class="eyebrow">Operations Dashboard</p>
+      <a class="button secondary" href="/">Back to Recruiter Page</a>
+    </header>
+
+    <main class="shell layout">
+      <section class="status reveal">
+        <h3>SLO Dashboard</h3>
+        <div class="status-grid">
+          <article>
+            <p class="label">Availability</p>
+            <p class="value" id="availability">-</p>
+          </article>
+          <article>
+            <p class="label">Orchestrator Success</p>
+            <p class="value" id="success">-</p>
+          </article>
+          <article>
+            <p class="label">Policy Block Rate</p>
+            <p class="value" id="policyBlock">-</p>
+          </article>
+          <article>
+            <p class="label">First Token p95</p>
+            <p class="value" id="firstToken">-</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="capabilities reveal">
+        <h3>Canary Controls</h3>
+        <div class="grid">
+          <article class="capability">
+            <p class="title">Canary Enabled</p>
+            <span class="pill" id="canaryEnabled">-</span>
+          </article>
+          <article class="capability">
+            <p class="title">Traffic Split</p>
+            <p class="value" id="canaryTraffic">-</p>
+          </article>
+          <article class="capability">
+            <p class="title">Candidate Model</p>
+            <p class="value" id="canaryModel">-</p>
+          </article>
+          <article class="capability">
+            <p class="title">Last Rollback</p>
+            <p class="value" id="rollbackTime">-</p>
+          </article>
+          <article class="capability">
+            <p class="title">Rollback Reason</p>
+            <p class="value" id="rollbackReason">-</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="architecture reveal">
+        <h3>Offline Eval Snapshot</h3>
+        <div class="status-grid">
+          <article>
+            <p class="label">Report Time</p>
+            <p class="value" id="evalGenerated">-</p>
+          </article>
+          <article>
+            <p class="label">Cases</p>
+            <p class="value" id="evalCases">-</p>
+          </article>
+          <article>
+            <p class="label">Average Score</p>
+            <p class="value" id="evalScore">-</p>
+          </article>
+          <article>
+            <p class="label">Status</p>
+            <p class="value" id="evalStatus">-</p>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <script type="module" src="/assets/ops.js"></script>
+  </body>
+</html>

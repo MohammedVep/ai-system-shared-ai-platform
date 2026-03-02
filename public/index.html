@@ -1,0 +1,130 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Shared AI Platform | Recruiter Brief</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Sora:wght@400;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="bg-noise" aria-hidden="true"></div>
+    <div class="orb orb-a" aria-hidden="true"></div>
+    <div class="orb orb-b" aria-hidden="true"></div>
+
+    <header class="shell topbar reveal">
+      <p class="eyebrow">AI Systems Engineering Portfolio</p>
+      <span class="badge" id="healthBadge">Checking service health...</span>
+    </header>
+
+    <main class="shell layout">
+      <section class="hero reveal">
+        <h1>One AI Platform Across Projects</h1>
+        <p>
+          Centralized AI Gateway with policy-enforced tool execution, planner-executor-verifier workflows,
+          observability, and evaluation loops. Built for production reliability and cross-team reuse.
+        </p>
+        <div class="hero-metrics" id="heroMetrics">
+          <article>
+            <h2 id="runCount">0</h2>
+            <p>Total Runs</p>
+          </article>
+          <article>
+            <h2 id="sessionCount">0</h2>
+            <p>Sessions</p>
+          </article>
+          <article>
+            <h2 id="eventCount">0</h2>
+            <p>Telemetry Events</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="capabilities reveal">
+        <h3>Core Capabilities</h3>
+        <div class="grid" id="capabilityGrid"></div>
+      </section>
+
+      <section class="status reveal">
+        <h3>Runtime Status</h3>
+        <div class="status-grid">
+          <article>
+            <p class="label">Model Provider</p>
+            <p class="value" id="providerValue">-</p>
+          </article>
+          <article>
+            <p class="label">Run Timeout</p>
+            <p class="value" id="timeoutValue">-</p>
+          </article>
+          <article>
+            <p class="label">Max Plan Steps</p>
+            <p class="value" id="stepsValue">-</p>
+          </article>
+          <article>
+            <p class="label">Telemetry Retention</p>
+            <p class="value" id="retentionValue">-</p>
+          </article>
+          <article>
+            <p class="label">First Token p95</p>
+            <p class="value" id="firstTokenValue">-</p>
+          </article>
+          <article>
+            <p class="label">Canary Traffic</p>
+            <p class="value" id="canaryValue">-</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="architecture reveal">
+        <h3>System Architecture</h3>
+        <div class="timeline">
+          <article>
+            <span>01</span>
+            <div>
+              <h4>Gateway API</h4>
+              <p>REST + SSE for sessions, runs, streaming tokens, and feedback ingestion.</p>
+            </div>
+          </article>
+          <article>
+            <span>02</span>
+            <div>
+              <h4>Agent Orchestrator</h4>
+              <p>Planner generates bounded plans, executor performs tool/model steps, verifier enforces completion.</p>
+            </div>
+          </article>
+          <article>
+            <span>03</span>
+            <div>
+              <h4>Policy + Guardrails</h4>
+              <p>Hard enforcement, prompt-injection neutralization, scope checks, and output redaction.</p>
+            </div>
+          </article>
+          <article>
+            <span>04</span>
+            <div>
+              <h4>Telemetry + Eval</h4>
+              <p>Run events, audit trails, and offline evaluation harness for regression control.</p>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="cta reveal">
+        <h3>Recruiter Snapshot</h3>
+        <p>
+          This project demonstrates modern AI platform engineering: API design, orchestrated agents, tool safety,
+          observability, deployment readiness, and measurable quality controls.
+        </p>
+        <a class="button" href="/health" target="_blank" rel="noreferrer">Open Live Health Endpoint</a>
+        <a class="button secondary" href="/dashboard">Open Ops Dashboard</a>
+      </section>
+    </main>
+
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>

@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { loadEnv } from "../../config/env.js";
 import { ModelRouter } from "../model/modelRouter.js";
@@ -48,17 +48,18 @@ const run = async (): Promise<void> => {
   }
 
   const avg = results.reduce((acc, item) => acc + item.score, 0) / results.length;
-  console.log(
-    JSON.stringify(
-      {
-        total: results.length,
-        average_score: Number(avg.toFixed(3)),
-        results
-      },
-      null,
-      2,
-    ),
-  );
+  const report = {
+    generated_at: new Date().toISOString(),
+    total: results.length,
+    average_score: Number(avg.toFixed(3)),
+    results
+  };
+
+  const resultsDir = join(process.cwd(), "eval-results");
+  await mkdir(resultsDir, { recursive: true });
+  await writeFile(join(resultsDir, "latest.json"), `${JSON.stringify(report, null, 2)}\n`, "utf8");
+
+  console.log(JSON.stringify(report, null, 2));
 };
 
 run().catch((error) => {
