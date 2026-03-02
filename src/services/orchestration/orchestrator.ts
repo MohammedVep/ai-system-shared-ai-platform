@@ -11,6 +11,7 @@ import type { ToolBroker } from "../tool/toolBroker.js";
 import type { ModelRouter } from "../model/modelRouter.js";
 import type { TelemetryService } from "../telemetry/telemetryService.js";
 import type { CanaryService } from "../ops/canaryService.js";
+import type { CostService } from "../ops/costService.js";
 
 export class Orchestrator {
   private readonly planner: Planner;
@@ -26,11 +27,12 @@ export class Orchestrator {
     policyEngine: PolicyEngine,
     toolBroker: ToolBroker,
     modelRouter: ModelRouter,
+    costService: CostService,
     private readonly canaryService: CanaryService,
     private readonly telemetry: TelemetryService,
   ) {
     this.planner = new Planner(env.maxPlanSteps);
-    this.executor = new Executor(env, store, toolBroker, policyEngine, modelRouter, telemetry);
+    this.executor = new Executor(env, store, toolBroker, policyEngine, modelRouter, costService, telemetry);
     this.policyEngine = policyEngine;
     this.toolBroker = toolBroker;
   }
@@ -85,7 +87,7 @@ export class Orchestrator {
 
   private async executeLoop(run: RunRecord): Promise<void> {
     const maxAttempts = 2;
-    const actorScopes = ["read"];
+    const actorScopes = run.actorScopes?.length ? run.actorScopes : ["read"];
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       run.attempts = attempt;
@@ -250,6 +252,7 @@ export class Orchestrator {
         terminationReason: payload.terminationReason,
         error: payload.error,
         answer: run.finalAnswer,
+        costUsd: run.costUsd,
         releaseChannel: run.releaseChannel,
         modelHint: run.modelHint
       }

@@ -7,6 +7,11 @@ Centralized AI Gateway for all internal projects with:
 - Tool broker + SDK contracts
 - Streaming run events over SSE
 - Audit + telemetry event trail
+- JWT/Cognito or API-key authentication
+- Global + route-level rate limiting
+- Retry/backoff for model, tool, auth JWKS, and NetPulse dispatch
+- Structured failure responses with trace IDs and retry hints
+- Cost-budget enforcement and per-project cost visibility
 - Canary controls + automatic rollback thresholds
 - SLO and operations dashboard endpoints
 - Telecom connector + cloud code execution tool
@@ -22,6 +27,25 @@ Centralized AI Gateway for all internal projects with:
 2. `npm install`
 3. `npm run dev`
 4. Server: `http://localhost:3000`
+
+## Production Controls (All Projects)
+- Auth modes:
+  - `AUTH_MODE=none|api_key|jwt|hybrid`
+  - API key header: `x-api-key`
+  - JWT header: `Authorization: Bearer <token>`
+  - JWT supports shared-secret validation or AWS Cognito JWKS
+- Rate limits:
+  - Global: `GLOBAL_RATE_PER_MINUTE`
+  - Message/session routes: `MESSAGE_RATE_PER_MINUTE`
+  - Response headers: `x-ratelimit-remaining`, `x-ratelimit-reset`, `x-ratelimit-global-remaining`, `x-ratelimit-global-reset`
+- Cost controls:
+  - `ENFORCE_COST_BUDGET`
+  - `DEFAULT_DAILY_COST_BUDGET_USD`
+  - `PROJECT_DAILY_COST_BUDGETS_JSON`
+  - `GET /v1/ops/costs?project_id=<id>`
+- Failure handling:
+  - Error body always includes `trace_id` and `retryable`
+  - `429` responses include `retry-after`
 
 ## Recruiter Frontend
 - Landing page: `GET /`

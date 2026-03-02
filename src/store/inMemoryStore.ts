@@ -100,6 +100,7 @@ export class InMemoryStore {
     feedbackCount: number;
     auditEntryCount: number;
     totalEventCount: number;
+    totalCostUsd: number;
   } {
     const runStatusCounts = [...this.runs.values()].reduce<Record<string, number>>((acc, run) => {
       acc[run.status] = (acc[run.status] ?? 0) + 1;
@@ -107,6 +108,9 @@ export class InMemoryStore {
     }, {});
 
     const totalEventCount = [...this.runEvents.values()].reduce((acc, events) => acc + events.length, 0);
+    const totalCostUsd = Number(
+      [...this.runs.values()].reduce((acc, run) => acc + (run.costUsd ?? 0), 0).toFixed(8),
+    );
 
     return {
       sessionCount: this.sessions.size,
@@ -114,7 +118,8 @@ export class InMemoryStore {
       runStatusCounts,
       feedbackCount: this.feedback.size,
       auditEntryCount: this.toolAudit.size,
-      totalEventCount
+      totalEventCount,
+      totalCostUsd
     };
   }
 }

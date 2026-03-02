@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vitest";
+import { SignJWT } from "jose";
 import { buildApp } from "../src/app.js";
+import type { ToolAdapter } from "../src/contracts/sdk.js";
 import type { Env } from "../src/config/env.js";
 
 const baseEnv: Env = {
@@ -7,17 +9,35 @@ const baseEnv: Env = {
   port: 3001,
   openAiApiKey: undefined,
   openAiModel: "gpt-4o-mini",
+  authMode: "none",
   requireApiKey: false,
   apiKeys: {},
+  jwtSharedSecret: undefined,
+  jwtIssuer: undefined,
+  jwtAudience: undefined,
+  cognitoRegion: undefined,
+  cognitoUserPoolId: undefined,
+  jwtProjectClaim: "project_id",
+  jwtUserClaim: "sub",
   runTimeoutMs: 45_000,
   maxPlanSteps: 6,
   retryTransient: 2,
+  retryBaseDelayMs: 50,
+  retryMaxDelayMs: 250,
   messageRatePerMinute: 60,
+  globalRatePerMinute: 240,
   retentionDays: 30,
+  enforceCostBudget: true,
+  defaultDailyCostBudgetUsd: 5,
+  projectDailyCostBudgets: {
+    default: 5
+  },
+  toolCallCostUsd: 0.0002,
   failClosedScopes: new Set(["write", "admin", "payment"]),
   projectToolAllowlist: {
     default: ["echo"]
-  }
+  },
+  netPulseEndpoint: undefined
 };
 
 const waitForTerminalRun = async (
@@ -322,5 +342,271 @@ describe("Shared AI Platform API", () => {
     expect(streamRes.headers["content-type"]).toContain("text/event-stream");
     expect(streamRes.body).toContain("RunStarted");
     expect(streamRes.body).toContain("RunCompleted");
+  });
+
+  it("enforces API key auth with structured unauthorized errors", async () => {
+    const app = buildApp({
+      env: {
+        ...baseEnv,
+        authMode: "api_key",
+        requireApiKey: true,
+        apiKeys: {
+          "prod-key": "default"
+        }
+      }
+    });
+    apps.push(app);
+
+    const missingAuth = await app.inject({
+      method: "POST",
+      url: "/v1/sessions",
+      payload: {
+        project_id: "default",
+        user_id: "user-auth",
+        channel: "web"
+      }
+    });
+    expect(missingAuth.statusCode).toBe(401);
+    expect(missingAuth.json().error).toBe("unauthorized");
+    expect(missingAuth.json().trace_id).toBeTruthy();
+    expect(missingAuth.json().retryable).toBe(false);
+
+    const allowed = await app.inject({
+      method: "POST",
+      url: "/v1/sessions",
+      headers: {
+        "x-api-key": "prod-key"
+      },
+      payload: {
+        project_id: "default",
+        user_id: "user-auth",
+        channel: "web"
+      }
+    });
+    expect(allowed.statusCode).toBe(201);
+  });
+
+  it("supports JWT auth mode with project-scoped claims", async () => {
+    const jwtSecret = "test-jwt-secret-123";
+    const token = await new SignJWT({
+      project_id: "default",
+      scope: "read write"
+    })
+      .setProtectedHeader({ alg: "HS256" })
+      .setIssuer("urn:test:issuer")
+      .setAudience("ai-platform")
+      .setSubject("jwt-user-1")
+      .setExpirationTime("2h")
+      .sign(new TextEncoder().encode(jwtSecret));
+
+    const app = buildApp({
+      env: {
+        ...baseEnv,
+        authMode: "jwt",
+        jwtSharedSecret: jwtSecret,
+        jwtIssuer: "urn:test:issuer",
+        jwtAudience: "ai-platform"
+      }
+    });
+    apps.push(app);
+
+    const unauthorized = await app.inject({
+      method: "POST",
+      url: "/v1/sessions",
+      payload: {
+        project_id: "default",
+        user_id: "ignored-user",
+        channel: "web"
+      }
+    });
+    expect(unauthorized.statusCode).toBe(401);
+
+    const authorized = await app.inject({
+      method: "POST",
+      url: "/v1/sessions",
+      headers: {
+        authorization: `Bearer ${token}`
+      },
+      payload: {
+        project_id: "default",
+        user_id: "ignored-user",
+        channel: "web"
+      }
+    });
+    expect(authorized.statusCode).toBe(201);
+  });
+
+  it("returns 429 with retry metadata when rate limit is exceeded", async () => {
+    const app = buildApp({
+      env: {
+        ...baseEnv,
+        globalRatePerMinute: 2
+      }
+    });
+    apps.push(app);
+
+    const first = await app.inject({ method: "GET", url: "/health" });
+    const second = await app.inject({ method: "GET", url: "/health" });
+    const third = await app.inject({ method: "GET", url: "/health" });
+
+    expect(first.statusCode).toBe(200);
+    expect(second.statusCode).toBe(200);
+    expect(third.statusCode).toBe(429);
+    expect(third.json().error).toBe("rate_limited");
+    expect(third.json().retryable).toBe(true);
+    expect(third.json().trace_id).toBeTruthy();
+    expect(third.headers["retry-after"]).toBeTruthy();
+  });
+
+  it("terminates runs when daily cost budget is exceeded", async () => {
+    const app = buildApp({
+      env: {
+        ...baseEnv,
+        defaultDailyCostBudgetUsd: 0.0001,
+        projectDailyCostBudgets: {
+          default: 0.0001
+        }
+      }
+    });
+    apps.push(app);
+
+    const sessionRes = await app.inject({
+      method: "POST",
+      url: "/v1/sessions",
+      payload: {
+        project_id: "default",
+        user_id: "cost-user",
+        channel: "web"
+      }
+    });
+
+    const sessionId = sessionRes.json().session_id as string;
+    const msgRes = await app.inject({
+      method: "POST",
+      url: `/v1/sessions/${sessionId}/messages`,
+      payload: {
+        message: "Give me a full answer",
+        tool_mode: "auto",
+        response_mode: "stream"
+      }
+    });
+
+    const run = await waitForTerminalRun(app, msgRes.json().run_id);
+    expect(run.status).toBe("failed");
+    expect(run.termination_reason).toBe("cost_budget_exceeded");
+    expect(run.error).toBe("daily_cost_budget_exceeded");
+  });
+
+  it("retries transient tool failures with backoff and succeeds", async () => {
+    let attempts = 0;
+    const flakyTool: ToolAdapter = {
+      toolId: "flaky_tool",
+      description: "Fails once then succeeds",
+      inputSchema: {
+        type: "object",
+        properties: {},
+        additionalProperties: false
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          ok: { type: "boolean" }
+        },
+        required: ["ok"],
+        additionalProperties: false
+      },
+      timeoutMs: 1000,
+      scopes: ["read"],
+      execute: async () => {
+        attempts += 1;
+        if (attempts === 1) {
+          throw new Error("temporary upstream failure");
+        }
+        return {
+          output: {
+            ok: true
+          }
+        };
+      }
+    };
+
+    const app = buildApp({
+      env: {
+        ...baseEnv,
+        projectToolAllowlist: {
+          default: ["echo", "flaky_tool"]
+        }
+      },
+      toolAdapters: [{ projectId: "default", adapter: flakyTool }]
+    });
+    apps.push(app);
+
+    const sessionRes = await app.inject({
+      method: "POST",
+      url: "/v1/sessions",
+      payload: {
+        project_id: "default",
+        user_id: "retry-user",
+        channel: "web"
+      }
+    });
+    const sessionId = sessionRes.json().session_id as string;
+
+    const msgRes = await app.inject({
+      method: "POST",
+      url: `/v1/sessions/${sessionId}/messages`,
+      payload: {
+        message: "/tool flaky_tool {}",
+        tool_mode: "auto",
+        response_mode: "stream"
+      }
+    });
+
+    const run = await waitForTerminalRun(app, msgRes.json().run_id);
+    expect(run.status).toBe("completed");
+    expect(attempts).toBe(2);
+  });
+
+  it("propagates request trace IDs into run records", async () => {
+    const app = buildApp({ env: baseEnv });
+    apps.push(app);
+
+    const sessionRes = await app.inject({
+      method: "POST",
+      url: "/v1/sessions",
+      headers: {
+        "x-trace-id": "trace-create-1"
+      },
+      payload: {
+        project_id: "default",
+        user_id: "trace-user",
+        channel: "web"
+      }
+    });
+    expect(sessionRes.headers["x-trace-id"]).toBe("trace-create-1");
+
+    const sessionId = sessionRes.json().session_id as string;
+    const msgRes = await app.inject({
+      method: "POST",
+      url: `/v1/sessions/${sessionId}/messages`,
+      headers: {
+        "x-trace-id": "trace-run-1"
+      },
+      payload: {
+        message: "trace test",
+        tool_mode: "auto",
+        response_mode: "stream"
+      }
+    });
+
+    expect(msgRes.json().trace_id).toBe("trace-run-1");
+    const run = await waitForTerminalRun(app, msgRes.json().run_id);
+    expect(run.status).toBe("completed");
+
+    const runState = await app.inject({
+      method: "GET",
+      url: `/v1/runs/${msgRes.json().run_id}`
+    });
+    expect(runState.json().trace_id).toBe("trace-run-1");
   });
 });

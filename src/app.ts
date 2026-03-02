@@ -1,4 +1,4 @@
-import Fastify from "fastify";
+import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import fastifyStatic from "@fastify/static";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
@@ -15,7 +15,7 @@ import {
 } from "./api/schemas.js";
 import { InMemoryStore } from "./store/inMemoryStore.js";
 import { newId } from "./utils/id.js";
-import { AuthError, AuthService } from "./api/auth.js";
+import { AuthError, AuthService, type AuthContext } from "./api/auth.js";
 import { FixedWindowRateLimiter, RateLimitError } from "./api/rateLimiter.js";
 import { ContextService } from "./services/context/contextService.js";
 import { PolicyEngine } from "./services/policy/policyEngine.js";
@@ -29,6 +29,7 @@ import type { ToolAdapter } from "./contracts/sdk.js";
 import { logger } from "./services/telemetry/logger.js";
 import { CanaryService } from "./services/ops/canaryService.js";
 import { SloService } from "./services/ops/sloService.js";
+import { CostService } from "./services/ops/costService.js";
 import { CloudCodeExecutionService } from "./services/integrations/cloudCodeExecutionService.js";
 import { NetPulseService } from "./services/integrations/netPulseService.js";
 import { TelecomService } from "./services/integrations/telecomService.js";
@@ -38,6 +39,17 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const staticCandidates = [join(__dirname, "..", "public"), join(__dirname, "..", "..", "public")];
 const staticRoot = staticCandidates.find((path) => existsSync(path)) ?? staticCandidates[0];
+
+type RequestCtx = FastifyRequest & {
+  traceId?: string;
+  authContext?: AuthContext;
+};
+
+const readTraceId = (request: FastifyRequest): string =>
+  (request as RequestCtx).traceId ?? request.id;
+
+const readAuthContext = (request: FastifyRequest): AuthContext | undefined =>
+  (request as RequestCtx).authContext;
 
 export type AppDeps = {
   env?: Env;
@@ -171,7 +183,7 @@ export const buildApp = (deps: AppDeps = {}) => {
   const store = deps.store ?? new InMemoryStore();
 
   const authService = new AuthService(env);
-  const rateLimiter = new FixedWindowRateLimiter(env.messageRatePerMinute);
+  const rateLimiter = new FixedWindowRateLimiter(env.globalRatePerMinute);
 
   const contextService = new ContextService(store);
   const policyEngine = new PolicyEngine(env);
@@ -182,8 +194,13 @@ export const buildApp = (deps: AppDeps = {}) => {
   const onboardingService = new ProjectOnboardingService();
   const canaryService = new CanaryService(modelRouter.defaultModel());
   const sloService = new SloService(store);
+  const costService = new CostService(env);
   const telemetry = new TelemetryService(store);
-  const netPulseService = new NetPulseService(env.netPulseEndpoint);
+  const netPulseService = new NetPulseService(env.netPulseEndpoint, {
+    retries: env.retryTransient,
+    baseDelayMs: env.retryBaseDelayMs,
+    maxDelayMs: env.retryMaxDelayMs
+  });
   telemetry.registerSink((event) => netPulseService.publish(event));
   const orchestrator = new Orchestrator(
     env,
@@ -192,6 +209,7 @@ export const buildApp = (deps: AppDeps = {}) => {
     policyEngine,
     toolBroker,
     modelRouter,
+    costService,
     canaryService,
     telemetry,
   );
@@ -222,9 +240,66 @@ export const buildApp = (deps: AppDeps = {}) => {
     return reply.type("text/html").sendFile("ops.html");
   });
 
+  app.addHook("onRequest", async (request, reply) => {
+    const traceIdHeader = request.headers["x-trace-id"];
+    const traceId = typeof traceIdHeader === "string" && traceIdHeader.length > 0 ? traceIdHeader : newId();
+    (request as RequestCtx).traceId = traceId;
+    reply.header("x-trace-id", traceId);
+
+    const requestPath = request.url.split("?")[0] ?? request.url;
+    const isPublicRoute =
+      requestPath === "/" ||
+      requestPath === "/dashboard" ||
+      requestPath === "/health" ||
+      requestPath === "/v1/platform/status" ||
+      requestPath.startsWith("/assets/");
+
+    const authContext = isPublicRoute
+      ? {
+          projectId: "public",
+          userId: "anonymous",
+          scopes: [],
+          authType: "anonymous" as const
+        }
+      : await authService.authorize({
+          apiKey: request.headers["x-api-key"] as string | undefined,
+          authorizationHeader: request.headers.authorization,
+          fallbackUserId: "anonymous"
+        });
+    (request as RequestCtx).authContext = authContext;
+
+    const baseIdentity = `${request.ip}:${authContext.projectId}:${authContext.userId}:${authContext.authType}`;
+    const globalLimit = rateLimiter.check(baseIdentity, {
+      bucket: "global",
+      limitPerMinute: env.globalRatePerMinute
+    });
+    reply.header("x-ratelimit-global-remaining", globalLimit.remaining);
+    reply.header("x-ratelimit-global-reset", globalLimit.resetAtEpochMs);
+  });
+
+  app.addHook("onResponse", async (request, reply) => {
+    const authContext = readAuthContext(request);
+    app.log.info(
+      {
+        traceId: readTraceId(request),
+        method: request.method,
+        url: request.url,
+        statusCode: reply.statusCode,
+        projectId: authContext?.projectId,
+        userId: authContext?.userId,
+        authType: authContext?.authType
+      },
+      "request finished",
+    );
+  });
+
+  app.setErrorHandler((error, request, reply) => handleError(request, reply, error));
+
   const enqueueRun = (params: {
     session: Session;
     message: string;
+    traceId: string;
+    actorScopes: string[];
     contextRefs?: string[];
     toolMode: "auto" | "required" | "none";
     responseMode: "stream" | "sync";
@@ -253,10 +328,11 @@ export const buildApp = (deps: AppDeps = {}) => {
 
     const run: RunRecord = {
       id: runId,
-      traceId: newId(),
+      traceId: params.traceId,
       sessionId: params.session.id,
       projectId: params.session.projectId,
       userId: params.session.userId,
+      actorScopes: params.actorScopes,
       releaseChannel: assignment.channel,
       modelHint: assignment.modelHint,
       status: "queued",
@@ -286,6 +362,21 @@ export const buildApp = (deps: AppDeps = {}) => {
     return { run, reused: false };
   };
 
+  const authorizeProjectRequest = async (
+    request: FastifyRequest,
+    projectId: string,
+    fallbackUserId: string,
+  ): Promise<AuthContext> => {
+    const authContext = await authService.authorize({
+      requestedProjectId: projectId,
+      apiKey: request.headers["x-api-key"] as string | undefined,
+      authorizationHeader: request.headers.authorization,
+      fallbackUserId
+    });
+    (request as RequestCtx).authContext = authContext;
+    return authContext;
+  };
+
   app.get("/health", async () => ({
     status: "ok",
     provider: modelRouter.currentProviderName(),
@@ -299,6 +390,10 @@ export const buildApp = (deps: AppDeps = {}) => {
       environment: env.nodeEnv,
       provider: modelRouter.currentProviderName(),
       generated_at: new Date().toISOString(),
+      auth: {
+        mode: env.authMode,
+        require_api_key: env.requireApiKey
+      },
       capabilities: {
         chat_interface: true,
         context_assembly: true,
@@ -315,11 +410,17 @@ export const buildApp = (deps: AppDeps = {}) => {
         timeout_ms: env.runTimeoutMs,
         max_plan_steps: env.maxPlanSteps,
         retry_transient: env.retryTransient,
+        retry_base_delay_ms: env.retryBaseDelayMs,
+        retry_max_delay_ms: env.retryMaxDelayMs,
+        message_rate_per_minute: env.messageRatePerMinute,
+        global_rate_per_minute: env.globalRatePerMinute,
+        enforce_cost_budget: env.enforceCostBudget,
         retention_days: env.retentionDays,
         cloud_exec_workers: cloudCodeExecutionService.workerCount()
       },
       summary,
       slo: sloService.buildDashboard(),
+      cost: costService.globalSummary(),
       canary: canaryService.getState(),
       netpulse: netPulseService.status()
     };
@@ -346,7 +447,7 @@ export const buildApp = (deps: AppDeps = {}) => {
       });
       return reply.send(updated);
     } catch (error) {
-      return handleError(reply, error);
+      return handleError(request, reply, error);
     }
   });
 
@@ -361,6 +462,14 @@ export const buildApp = (deps: AppDeps = {}) => {
   });
 
   app.get("/v1/ops/netpulse", async () => netPulseService.status());
+
+  app.get("/v1/ops/costs", async (request) => {
+    const projectId = (request.query as { project_id?: string }).project_id;
+    if (projectId) {
+      return costService.projectSummary(projectId);
+    }
+    return costService.globalSummary();
+  });
 
   app.get("/v1/transit/telemetry/stream", async (request, reply) => {
     reply.raw.writeHead(200, {
@@ -386,6 +495,7 @@ export const buildApp = (deps: AppDeps = {}) => {
   app.post("/v1/onboarding/projects", async (request, reply) => {
     try {
       const body = onboardingProjectSchema.parse(request.body);
+      await authorizeProjectRequest(request, body.project_id, "onboarding");
       const project = onboardingService.register({
         projectId: body.project_id,
         legacyEndpoint: body.legacy_endpoint,
@@ -394,7 +504,7 @@ export const buildApp = (deps: AppDeps = {}) => {
       });
       return reply.code(201).send(project);
     } catch (error) {
-      return handleError(reply, error);
+      return handleError(request, reply, error);
     }
   });
 
@@ -402,6 +512,7 @@ export const buildApp = (deps: AppDeps = {}) => {
 
   app.post("/v1/onboarding/projects/:projectId/pilot-live", async (request, reply) => {
     const projectId = (request.params as { projectId: string }).projectId;
+    await authorizeProjectRequest(request, projectId, "onboarding");
     const updated = onboardingService.markStatus(projectId, "pilot_live");
     if (!updated) {
       return reply.code(404).send({ error: "project_not_found" });
@@ -418,12 +529,19 @@ export const buildApp = (deps: AppDeps = {}) => {
       }
 
       const body = legacyMessageSchema.parse(request.body);
-      let session = store.findSessionByProjectUser(projectId, body.user_id);
+      const authContext = await authorizeProjectRequest(request, projectId, body.user_id);
+      const routeLimit = rateLimiter.check(`${authContext.projectId}:${authContext.userId}`, {
+        bucket: "legacy_message",
+        limitPerMinute: env.messageRatePerMinute
+      });
+      reply.header("x-ratelimit-remaining", routeLimit.remaining);
+      reply.header("x-ratelimit-reset", routeLimit.resetAtEpochMs);
+      let session = store.findSessionByProjectUser(projectId, authContext.userId);
       if (!session) {
         session = store.createSession({
           id: newId(),
           projectId,
-          userId: body.user_id,
+          userId: authContext.userId,
           channel: "legacy_migrated",
           createdAt: new Date().toISOString(),
           messages: []
@@ -433,6 +551,8 @@ export const buildApp = (deps: AppDeps = {}) => {
       const { run } = enqueueRun({
         session,
         message: body.message,
+        traceId: readTraceId(request),
+        actorScopes: authContext.scopes,
         contextRefs: body.context_refs,
         toolMode: body.tool_mode,
         responseMode: body.response_mode
@@ -446,21 +566,25 @@ export const buildApp = (deps: AppDeps = {}) => {
         migrated_from: onboardingProject.legacyEndpoint
       });
     } catch (error) {
-      return handleError(reply, error);
+      return handleError(request, reply, error);
     }
   });
 
   app.post("/v1/sessions", async (request, reply) => {
     try {
       const body = createSessionSchema.parse(request.body);
-      const apiKey = request.headers["x-api-key"] as string | undefined;
-      const projectId = authService.authorize(body.project_id, apiKey);
-      rateLimiter.check(`${projectId}:${body.user_id}`);
+      const authContext = await authorizeProjectRequest(request, body.project_id, body.user_id);
+      const routeLimit = rateLimiter.check(`${authContext.projectId}:${authContext.userId}`, {
+        bucket: "create_session",
+        limitPerMinute: env.messageRatePerMinute
+      });
+      reply.header("x-ratelimit-remaining", routeLimit.remaining);
+      reply.header("x-ratelimit-reset", routeLimit.resetAtEpochMs);
 
       const session: Session = {
         id: newId(),
-        projectId,
-        userId: body.user_id,
+        projectId: authContext.projectId,
+        userId: authContext.userId,
         channel: body.channel,
         metadata: body.metadata,
         createdAt: new Date().toISOString(),
@@ -473,7 +597,7 @@ export const buildApp = (deps: AppDeps = {}) => {
         created_at: session.createdAt
       });
     } catch (error) {
-      return handleError(reply, error);
+      return handleError(request, reply, error);
     }
   });
 
@@ -486,14 +610,20 @@ export const buildApp = (deps: AppDeps = {}) => {
       }
 
       const body = postMessageSchema.parse(request.body);
-      const apiKey = request.headers["x-api-key"] as string | undefined;
-      authService.authorize(session.projectId, apiKey);
-      rateLimiter.check(`${session.projectId}:${session.userId}`);
+      const authContext = await authorizeProjectRequest(request, session.projectId, session.userId);
+      const routeLimit = rateLimiter.check(`${authContext.projectId}:${authContext.userId}`, {
+        bucket: "message",
+        limitPerMinute: env.messageRatePerMinute
+      });
+      reply.header("x-ratelimit-remaining", routeLimit.remaining);
+      reply.header("x-ratelimit-reset", routeLimit.resetAtEpochMs);
 
       const idempotencyKey = request.headers["idempotency-key"] as string | undefined;
       const { run } = enqueueRun({
         session,
         message: body.message,
+        traceId: readTraceId(request),
+        actorScopes: authContext.scopes,
         contextRefs: body.context_refs,
         toolMode: body.tool_mode,
         responseMode: body.response_mode,
@@ -502,10 +632,11 @@ export const buildApp = (deps: AppDeps = {}) => {
 
       return reply.send({
         run_id: run.id,
-        status: run.status
+        status: run.status,
+        trace_id: readTraceId(request)
       });
     } catch (error) {
-      return handleError(reply, error);
+      return handleError(request, reply, error);
     }
   });
 
@@ -516,8 +647,11 @@ export const buildApp = (deps: AppDeps = {}) => {
       return reply.code(404).send({ error: "run_not_found" });
     }
 
+    await authorizeProjectRequest(request, run.projectId, run.userId);
+
     return reply.send({
       run_id: run.id,
+      trace_id: run.traceId,
       session_id: run.sessionId,
       project_id: run.projectId,
       release_channel: run.releaseChannel,
@@ -526,6 +660,7 @@ export const buildApp = (deps: AppDeps = {}) => {
       attempts: run.attempts,
       steps: run.steps,
       final_answer: run.finalAnswer,
+      cost_usd: run.costUsd ?? 0,
       termination_reason: run.terminationReason,
       error: run.error,
       created_at: run.createdAt,
@@ -540,6 +675,8 @@ export const buildApp = (deps: AppDeps = {}) => {
     if (!run) {
       return reply.code(404).send({ error: "run_not_found" });
     }
+
+    await authorizeProjectRequest(request, run.projectId, run.userId);
 
     reply.raw.writeHead(200, {
       "Content-Type": "text/event-stream",
@@ -581,8 +718,7 @@ export const buildApp = (deps: AppDeps = {}) => {
   app.post("/v1/feedback", async (request, reply) => {
     try {
       const body = feedbackSchema.parse(request.body);
-      const apiKey = request.headers["x-api-key"] as string | undefined;
-      authService.authorize(body.project_id, apiKey);
+      await authorizeProjectRequest(request, body.project_id, "anonymous");
 
       const run = store.getRun(body.run_id);
       if (!run) {
@@ -601,25 +737,50 @@ export const buildApp = (deps: AppDeps = {}) => {
 
       return reply.code(201).send({ status: "accepted" });
     } catch (error) {
-      return handleError(reply, error);
+      return handleError(request, reply, error);
     }
   });
 
   return app;
 };
 
-const handleError = (reply: { code: (statusCode: number) => { send: (body: unknown) => unknown } }, error: unknown) => {
+const handleError = (request: FastifyRequest, reply: FastifyReply, error: unknown) => {
+  const traceId = readTraceId(request);
+
   if (error instanceof AuthError) {
-    return reply.code(401).send({ error: "unauthorized", message: error.message });
+    return reply.code(401).send({
+      error: "unauthorized",
+      message: error.message,
+      trace_id: traceId,
+      retryable: false
+    });
   }
 
   if (error instanceof RateLimitError) {
-    return reply.code(429).send({ error: "rate_limited", message: error.message });
+    reply.header("retry-after", error.retryAfterSeconds);
+    return reply.code(429).send({
+      error: "rate_limited",
+      message: error.message,
+      trace_id: traceId,
+      retryable: true
+    });
   }
 
   if (error instanceof Error) {
-    return reply.code(400).send({ error: "bad_request", message: error.message });
+    const message = error.message.toLowerCase();
+    const retryable = message.includes("timeout") || message.includes("rate limit") || message.includes("temporarily");
+    const statusCode = message.includes("not found") ? 404 : 400;
+    return reply.code(statusCode).send({
+      error: "bad_request",
+      message: error.message,
+      trace_id: traceId,
+      retryable
+    });
   }
 
-  return reply.code(500).send({ error: "internal_error" });
+  return reply.code(500).send({
+    error: "internal_error",
+    trace_id: traceId,
+    retryable: false
+  });
 };

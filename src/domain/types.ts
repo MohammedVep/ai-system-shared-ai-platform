@@ -24,6 +24,7 @@ export type RunTerminationReason =
   | "blocked_by_policy"
   | "tool_failure_exhausted"
   | "insufficient_context"
+  | "cost_budget_exceeded"
   | "timeout"
   | "internal_error";
 
@@ -49,6 +50,7 @@ export type RunRecord = {
   sessionId: string;
   projectId: string;
   userId: string;
+  actorScopes: string[];
   releaseChannel: "baseline" | "canary";
   modelHint?: string;
   status: RunStatus;
@@ -61,6 +63,7 @@ export type RunRecord = {
   attempts: number;
   steps: PlanStep[];
   finalAnswer?: string;
+  costUsd?: number;
   terminationReason?: RunTerminationReason;
   error?: string;
   createdAt: string;

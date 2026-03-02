@@ -6,6 +6,7 @@ import { sha256 } from "../../utils/hash.js";
 import { newId } from "../../utils/id.js";
 import { retryTransient } from "../../utils/retry.js";
 import type { ModelRouter } from "../model/modelRouter.js";
+import type { CostService } from "../ops/costService.js";
 import type { PolicyEngine } from "../policy/policyEngine.js";
 import { ToolExecutionError, ToolValidationError, type ToolBroker } from "../tool/toolBroker.js";
 import type { TelemetryService } from "../telemetry/telemetryService.js";
@@ -24,12 +25,14 @@ export class Executor {
     private readonly toolBroker: ToolBroker,
     private readonly policyEngine: PolicyEngine,
     private readonly modelRouter: ModelRouter,
+    private readonly costService: CostService,
     private readonly telemetry: TelemetryService,
   ) {}
 
   async execute(run: RunRecord, plan: PlanStep[], actorScopes: string[]): Promise<ExecutionResult> {
     const toolOutputs: Array<{ toolId: string; output: unknown }> = [];
     let finalAnswer: string | undefined;
+    run.costUsd = this.costService.runTotal(run.id);
 
     for (const step of plan) {
       if (step.type === "tool_call") {
@@ -104,6 +107,15 @@ export class Executor {
         });
 
         try {
+          if (!this.allowCost(run.projectId, this.env.toolCallCostUsd)) {
+            run.costUsd = this.costService.runTotal(run.id);
+            return {
+              terminated: true,
+              terminationReason: "cost_budget_exceeded",
+              error: "daily_cost_budget_exceeded"
+            };
+          }
+
           const result = await retryTransient(
             () =>
               this.toolBroker.executeTool(run.projectId, step.toolId!, step.input ?? {}, {
@@ -113,7 +125,11 @@ export class Executor {
                 projectId: run.projectId,
                 userId: run.userId
               }),
-            this.env.retryTransient,
+            {
+              retries: this.env.retryTransient,
+              baseDelayMs: this.env.retryBaseDelayMs,
+              maxDelayMs: this.env.retryMaxDelayMs
+            },
             (error) => error instanceof ToolExecutionError && error.transient,
           );
 
@@ -144,11 +160,14 @@ export class Executor {
             timestamp: new Date().toISOString(),
             payload: {
               toolId: step.toolId,
-              output: result.output
+              output: result.output,
+              incrementalCostUsd: this.env.toolCallCostUsd
             }
           });
 
           toolOutputs.push({ toolId: step.toolId, output: result.output });
+          this.costService.recordCost(run.projectId, run.id, this.env.toolCallCostUsd);
+          run.costUsd = this.costService.runTotal(run.id);
           step.completed = true;
         } catch (error) {
           if (error instanceof ToolValidationError) {
@@ -177,6 +196,16 @@ export class Executor {
       }
 
       if (step.type === "model_response") {
+        const projectedModelSpend = 0.0005;
+        if (!this.allowCost(run.projectId, projectedModelSpend)) {
+          run.costUsd = this.costService.runTotal(run.id);
+          return {
+            terminated: true,
+            terminationReason: "cost_budget_exceeded",
+            error: "daily_cost_budget_exceeded"
+          };
+        }
+
         const response = await retryTransient(
           () =>
             this.modelRouter.generate({
@@ -196,7 +225,11 @@ export class Executor {
                 }
               ]
             }),
-          this.env.retryTransient,
+          {
+            retries: this.env.retryTransient,
+            baseDelayMs: this.env.retryBaseDelayMs,
+            maxDelayMs: this.env.retryMaxDelayMs
+          },
           isTransientModelError,
         );
 
@@ -234,10 +267,14 @@ export class Executor {
           });
         }
 
+        this.costService.recordCost(run.projectId, run.id, response.costEstimate);
+        run.costUsd = this.costService.runTotal(run.id);
         finalAnswer = redacted;
         step.completed = true;
       }
     }
+
+    run.costUsd = this.costService.runTotal(run.id);
 
     return {
       finalAnswer,
@@ -265,6 +302,11 @@ export class Executor {
       "Tool outputs:",
       toolText || "- none"
     ].join("\n");
+  }
+
+  private allowCost(projectId: string, proposedUsd: number): boolean {
+    const decision = this.costService.canSpend(projectId, proposedUsd);
+    return decision.allowed;
   }
 }
 
