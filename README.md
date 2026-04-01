@@ -153,10 +153,14 @@ Dataset path:
 This repository includes a repeatable App Runner to ECS Express migration path for the current production service.
 
 Current production endpoint:
-- ECS Express: `https://ai-baf78f42f0924a8297f5f12f885b9239.ecs.us-east-1.on.aws`
+- Public DNS: `https://sharedaigateway.com`
 
-Fallback endpoint during migration:
-- App Runner: `https://wvighhwvmf.us-east-1.awsapprunner.com`
+Direct ECS endpoint:
+- `https://ai-baf78f42f0924a8297f5f12f885b9239.ecs.us-east-1.on.aws`
+
+Migration status:
+- Public DNS cutover completed on `2026-04-01`
+- Legacy App Runner service deleted on `2026-04-01`
 
 Internal private DNS:
 - `shared-ai-platform.np-prod.internal`
@@ -168,17 +172,15 @@ Internal private DNS:
 The migration script also detects private interface endpoints for `ecr.api`, `ecr.dkr`, `ecs`, and `logs` in the target VPC and authorizes the ECS Express task security group on port `443` when needed. This is required in VPCs where private DNS for those endpoints is already enabled.
 
 Current workload note:
-- The existing App Runner service uses only the default `awsapprunner.com` URL and no custom domain.
-- Per AWS guidance, that means there is no weighted DNS cutover path. The correct migration shape is:
-- create and validate ECS Express first
-- move clients to the new endpoint or place a custom domain in front
-- delete App Runner only after validation
 - In this account, the current Fargate On-Demand vCPU usage is near the regional quota ceiling, so the ECS Express defaults in this repo are set to `256 CPU / 1024 MiB` with `maxTaskCount=1` to ensure the migrated service can launch. Increase the Fargate quota before scaling this service higher.
 
-Recommended remaining cutover steps:
-- update external clients to the ECS Express URL above or add a public DNS zone/custom domain in front of it
-- keep App Runner as rollback until client traffic is confirmed on ECS
-- after cutover, delete the App Runner service
+Completed cutover details:
+- Public hosted zone: `sharedaigateway.com`
+- ACM/TLS certificate terminates on the ECS Express ALB for `sharedaigateway.com`
+- External traffic now routes through Route 53 alias records to the ECS Express load balancer
+- The raw ECS hostname remains available for direct verification
+
+Remaining infrastructure step:
 - after the Fargate quota increase is approved, scale ECS Express back to `1024 CPU / 2048 MiB`
 
 Prepared scale-up path:
@@ -198,12 +200,3 @@ Prepared public domain registration + cutover path:
 - export `infra/ecs-express/public-domain-registration.env.example`
 - set `DOMAIN_CONTACT_EMAIL` to a real mailbox you control for registrar verification
 - run `infra/ecs-express/register-public-domain.sh`
-
-Current account limitation:
-- there is no public Route 53 hosted zone and no registered public domain in this AWS account right now
-- Route 53 Domains candidate availability checked:
-- `sharedaigateway.com`
-- `sharedaigateway.net`
-- `sharedaigateway.org`
-- `shared-ai-platform.com`
-- `sharedaiplatform.net`
