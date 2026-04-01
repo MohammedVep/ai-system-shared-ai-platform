@@ -1,0 +1,61 @@
+name: Deploy ECS Express
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+env:
+  AWS_REGION: us-east-1
+  ECR_REPOSITORY: ai-system-shared-ai-platform
+  ECS_CLUSTER: default
+  ECS_EXPRESS_SERVICE_NAME: ai-system-shared-ai-platform-ecs
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write
+      contents: read
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_TO_ASSUME }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and push image
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+        run: |
+          IMAGE_URI="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com/${ECR_REPOSITORY}:latest"
+          docker build -t "${IMAGE_URI}" .
+          docker push "${IMAGE_URI}"
+
+      - name: Deploy ECS Express service
+        env:
+          APP_RUNNER_SERVICE_ARN: ${{ vars.APP_RUNNER_SERVICE_ARN }}
+          EXECUTION_ROLE_NAME: ecsTaskExecutionRole
+          INFRASTRUCTURE_ROLE_NAME: ecsInfrastructureRoleForExpressServices
+          CONTAINER_IMAGE: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.${{ env.AWS_REGION }}.amazonaws.com/${{ env.ECR_REPOSITORY }}:latest
+          CONTAINER_PORT: "3000"
+          CPU: "256"
+          MEMORY: "1024"
+          HEALTH_CHECK_PATH: /health
+          MIN_TASK_COUNT: "1"
+          MAX_TASK_COUNT: "1"
+          AUTO_SCALING_METRIC: AVERAGE_CPU
+          AUTO_SCALING_TARGET_VALUE: "60"
+          ENV_VARS_JSON: '{"NODE_ENV":"production","OPENAI_MODEL":"gpt-4o-mini","PORT":"3000","PROJECT_TOOL_ALLOWLIST_JSON":"{\"default\":[\"echo\",\"write_audit_note\",\"telecom_dispatch\",\"cloud_code_exec\"]}"}'
+        run: |
+          chmod +x infra/ecs-express/migrate-from-apprunner.sh
+          infra/ecs-express/migrate-from-apprunner.sh

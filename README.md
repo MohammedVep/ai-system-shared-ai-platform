@@ -138,6 +138,7 @@ Dataset path:
 - Docker compose: `infra/docker-compose.yml`
 - Kubernetes baseline: `infra/k8s/deployment.yaml`
 - App Runner container config: `Dockerfile`
+- ECS Express migration assets: `infra/ecs-express/`
 
 ## AWS App Runner Deployment
 1. Build and push image to ECR:
@@ -147,3 +148,20 @@ Dataset path:
 - `docker tag ai-system-shared-ai-platform:latest <account-id>.dkr.ecr.us-east-1.amazonaws.com/ai-system-shared-ai-platform:latest`
 - `docker push <account-id>.dkr.ecr.us-east-1.amazonaws.com/ai-system-shared-ai-platform:latest`
 2. Create or update AWS App Runner service using that image with port `3000`.
+
+## AWS ECS Express Migration
+This repository includes a repeatable App Runner to ECS Express migration path for the current production service.
+
+1. Copy `infra/ecs-express/app-runner-migration.env.example` to a local env file and adjust values if needed.
+2. Export those variables in your shell.
+3. Run `infra/ecs-express/migrate-from-apprunner.sh`.
+
+The migration script also detects private interface endpoints for `ecr.api`, `ecr.dkr`, `ecs`, and `logs` in the target VPC and authorizes the ECS Express task security group on port `443` when needed. This is required in VPCs where private DNS for those endpoints is already enabled.
+
+Current workload note:
+- The existing App Runner service uses only the default `awsapprunner.com` URL and no custom domain.
+- Per AWS guidance, that means there is no weighted DNS cutover path. The correct migration shape is:
+- create and validate ECS Express first
+- move clients to the new endpoint or place a custom domain in front
+- delete App Runner only after validation
+- In this account, the current Fargate On-Demand vCPU usage is near the regional quota ceiling, so the ECS Express defaults in this repo are set to `256 CPU / 1024 MiB` with `maxTaskCount=1` to ensure the migrated service can launch. Increase the Fargate quota before scaling this service higher.
