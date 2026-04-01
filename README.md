@@ -152,6 +152,12 @@ Dataset path:
 ## AWS ECS Express Migration
 This repository includes a repeatable App Runner to ECS Express migration path for the current production service.
 
+Current production endpoint:
+- ECS Express: `https://ai-baf78f42f0924a8297f5f12f885b9239.ecs.us-east-1.on.aws`
+
+Fallback endpoint during migration:
+- App Runner: `https://wvighhwvmf.us-east-1.awsapprunner.com`
+
 1. Copy `infra/ecs-express/app-runner-migration.env.example` to a local env file and adjust values if needed.
 2. Export those variables in your shell.
 3. Run `infra/ecs-express/migrate-from-apprunner.sh`.
@@ -165,3 +171,9 @@ Current workload note:
 - move clients to the new endpoint or place a custom domain in front
 - delete App Runner only after validation
 - In this account, the current Fargate On-Demand vCPU usage is near the regional quota ceiling, so the ECS Express defaults in this repo are set to `256 CPU / 1024 MiB` with `maxTaskCount=1` to ensure the migrated service can launch. Increase the Fargate quota before scaling this service higher.
+
+Recommended remaining cutover steps:
+- update external clients to the ECS Express URL above or add a public DNS zone/custom domain in front of it
+- keep App Runner as rollback until client traffic is confirmed on ECS
+- after cutover, delete the App Runner service
+- after the Fargate quota increase is approved, scale ECS Express back to `1024 CPU / 2048 MiB`
