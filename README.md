@@ -188,3 +188,22 @@ Prepared scale-up path:
 Prepared internal DNS path:
 - export `infra/ecs-express/internal-dns.env.example`
 - run `infra/ecs-express/create-internal-dns.sh`
+
+Prepared public DNS cutover path:
+- export `infra/ecs-express/public-domain.env.example`
+- run `infra/ecs-express/configure-public-domain.sh`
+
+Prepared public domain registration + cutover path:
+- chosen public domain: `sharedaigateway.com`
+- export `infra/ecs-express/public-domain-registration.env.example`
+- set `DOMAIN_CONTACT_EMAIL` to a real mailbox you control for registrar verification
+- run `infra/ecs-express/register-public-domain.sh`
+
+Current account limitation:
+- there is no public Route 53 hosted zone and no registered public domain in this AWS account right now
+- Route 53 Domains candidate availability checked:
+- `sharedaigateway.com`
+- `sharedaigateway.net`
+- `sharedaigateway.org`
+- `shared-ai-platform.com`
+- `sharedaiplatform.net`
