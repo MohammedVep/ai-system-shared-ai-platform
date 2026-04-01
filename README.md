@@ -158,6 +158,9 @@ Current production endpoint:
 Fallback endpoint during migration:
 - App Runner: `https://wvighhwvmf.us-east-1.awsapprunner.com`
 
+Internal private DNS:
+- `shared-ai-platform.np-prod.internal`
+
 1. Copy `infra/ecs-express/app-runner-migration.env.example` to a local env file and adjust values if needed.
 2. Export those variables in your shell.
 3. Run `infra/ecs-express/migrate-from-apprunner.sh`.
@@ -177,3 +180,11 @@ Recommended remaining cutover steps:
 - keep App Runner as rollback until client traffic is confirmed on ECS
 - after cutover, delete the App Runner service
 - after the Fargate quota increase is approved, scale ECS Express back to `1024 CPU / 2048 MiB`
+
+Prepared scale-up path:
+- export `infra/ecs-express/scale-to-1024.env.example`
+- run `infra/ecs-express/scale-when-quota-ready.sh`
+
+Prepared internal DNS path:
+- export `infra/ecs-express/internal-dns.env.example`
+- run `infra/ecs-express/create-internal-dns.sh`
