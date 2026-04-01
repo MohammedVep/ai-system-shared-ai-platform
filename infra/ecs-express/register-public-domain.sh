@@ -63,20 +63,70 @@ else
   contact_json="$("${NODE_BIN}" -e '
 const payload = JSON.parse(process.argv[1]);
 const email = process.argv[2];
+const provinceMap = new Map([
+  ["alberta", "AB"],
+  ["british columbia", "BC"],
+  ["manitoba", "MB"],
+  ["new brunswick", "NB"],
+  ["newfoundland and labrador", "NL"],
+  ["newfoundland", "NL"],
+  ["nova scotia", "NS"],
+  ["northwest territories", "NT"],
+  ["nunavut", "NU"],
+  ["ontario", "ON"],
+  ["prince edward island", "PE"],
+  ["quebec", "QC"],
+  ["saskatchewan", "SK"],
+  ["yukon", "YK"],
+  ["yukon territory", "YK"],
+]);
 const fullName = payload.ContactInformation?.FullName?.trim() || "";
 const parts = fullName.split(/\s+/).filter(Boolean);
 const firstName = parts.shift() || "Shared";
 const lastName = parts.join(" ") || "AI Platform";
+const countryCode = payload.ContactInformation?.CountryCode || "US";
+const rawState = (payload.ContactInformation?.StateOrRegion || "").trim();
+const normalizedState = (() => {
+  if (!rawState) return "";
+  if (countryCode !== "CA") return rawState;
+  const upper = rawState.toUpperCase();
+  if (provinceMap.has(rawState.toLowerCase())) return provinceMap.get(rawState.toLowerCase());
+  if (provinceMap.has(upper.toLowerCase())) return provinceMap.get(upper.toLowerCase());
+  return upper;
+})();
+const rawPhone = (payload.ContactInformation?.PhoneNumber || "").trim();
+const normalizedPhone = (() => {
+  if (!rawPhone) return "";
+  const digits = rawPhone.replace(/\D/g, "");
+  if (rawPhone.startsWith("+")) {
+    const withoutPlus = rawPhone.slice(1).replace(/\D/g, "");
+    if (withoutPlus.length > 1) {
+      return `+${withoutPlus[0]}.${withoutPlus.slice(1)}`;
+    }
+  }
+  if (countryCode === "CA" || countryCode === "US") {
+    if (digits.length === 11 && digits.startsWith("1")) {
+      return `+1.${digits.slice(1)}`;
+    }
+    if (digits.length === 10) {
+      return `+1.${digits}`;
+    }
+  }
+  if (digits.length > 1) {
+    return `+${digits[0]}.${digits.slice(1)}`;
+  }
+  return rawPhone;
+})();
 const contact = {
   FirstName: firstName,
   LastName: lastName,
   ContactType: "PERSON",
   AddressLine1: payload.ContactInformation?.AddressLine1 || "",
   City: payload.ContactInformation?.City || "",
-  State: payload.ContactInformation?.StateOrRegion || "",
-  CountryCode: payload.ContactInformation?.CountryCode || "US",
+  State: normalizedState,
+  CountryCode: countryCode,
   ZipCode: payload.ContactInformation?.PostalCode || "",
-  PhoneNumber: payload.ContactInformation?.PhoneNumber || "",
+  PhoneNumber: normalizedPhone,
   Email: email,
 };
 process.stdout.write(JSON.stringify(contact));
@@ -139,4 +189,3 @@ export PUBLIC_HOSTED_ZONE_ID="${hosted_zone_id#/hostedzone/}"
 export PUBLIC_FQDN
 
 "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/configure-public-domain.sh"
-
